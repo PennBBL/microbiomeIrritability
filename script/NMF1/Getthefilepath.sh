@@ -11,6 +11,5 @@ filePath=`ls -d /data/jux/BBL/studies/grmpy/microbiome/output/NMF/ctmooth/${a}_C
 echo $filepath
 
 echo $filePath >> /data/jux/BBL/studies/grmpy/microbiome/demographics/microbiome_CTsmooth_Paths.csv
-
 done
 

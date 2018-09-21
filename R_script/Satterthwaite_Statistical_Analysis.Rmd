@@ -1,0 +1,571 @@
+---
+title: "Statistical Analysis Report"
+author: "PennCHOP Microbiome Program"
+date: \today
+output: 
+    pdf_document:
+        keep_tex: true
+        toc: true
+        includes:
+            in_header: TeX_packages_commands.sty
+---
+
+```{r setup, echo = FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+  )
+```
+
+```{r packages}
+library(pheatmap)
+library(grid)
+library(pander)
+library(stringr)
+library(qiimer)
+library(vegan)
+library(ape)
+library(tidyverse)
+library(subfunc)
+library(colorRamps)
+library(RColorBrewer)
+library(ggbeeswarm)
+library(ggrepel)
+library(viridis)
+library(ggmosaic)
+library(gridExtra)
+```
+
+```{r utility_functions}
+source("R_functions.R")
+```
+
+```{r file_paths}
+shared_dir <- "~/Satterthwaite/shared_drive"
+###===
+### Change "shared_dir" accordingly. "shared_dir" is where the following files are stored:
+###===
+#Satterthwaite_bacteria_count_simplified.tsv
+#Satterthwaite_KEGG.tsv
+#Satterthwaite_bacteria_count.tsv
+#Satterthwaite_metadata.tsv
+
+mapping_fp <- file.path(shared_dir, "Satterthwaite_metadata.tsv")
+bac_count_fp <- file.path(shared_dir, "Satterthwaite_bacteria_count_simplified.tsv")
+kegg_fp <- file.path(shared_dir, "Satterthwaite_KEGG.tsv")
+```
+
+```{r load_data}
+### metadata
+s <- read.delim(file = mapping_fp, header = T, as.is = T, sep = "\t")
+
+### bacteria counts
+cts <- read.delim(file = bac_count_fp, header = T, as.is = T, sep = "\t")
+rownames(cts) <- cts$Taxa
+cts <- cts %>%
+  select(-Taxa)
+
+### bacteria props
+props <- sweep(cts, 2, colSums(cts), "/")
+
+### Gene functions data
+kegg <- read.delim(file = kegg_fp, header = T, as.is = T, sep = "\t")
+rownames(kegg) <- kegg$KO_ID
+kegg <- kegg %>%
+  select(-KO_ID)
+```
+
+\newpage
+
+# Sample size
+
+```{r}
+s_Table <- addmargins(table(s$study_group, s$sex))
+pander(s_Table, caption = "Study group vs. sex")
+```
+
+\newpage
+
+# Heatmap based on bacteria taxonomic assignments
+
+```{r}
+prop_cut <- 0.01
+satu_limit <- 0.4
+```
+
+Each column of the heatmap represents one sample and each row represents one taxon. Taxa were included in the chart if the abundance in any sample exceeded `r 100*prop_cut`%. 
+
+The chart is colored white if taxa were not observed in the sample, dark blue if taxa were observed at very low abundance. This allows the reader to quickly survey presence/absence. Abundance values exceeding `r 100*satu_limit`% are colored red, indicating an extremely dominant species.
+
+```{r, fig.width=24, fig.height=36}
+s_Heat <- s 
+grps <- c("sex", "ariAvg")
+s_Heat <- s_Heat[, c("SampleID", grps)] 
+s_Heat <- arrange_(s_Heat, .dots = grps)
+
+anno <- s_Heat %>% select(-SampleID)
+rownames(anno) <- s_Heat$SampleID
+colnames(anno) <- grps
+
+props_Heat <- props[, s_Heat$SampleID]
+taxa_names_to_Heat <- rownames(props_Heat)[apply(props_Heat, 1, max) >= prop_cut]
+props_Heat <- props_Heat[taxa_names_to_Heat, ]
+
+color = saturated_rainbow(101, saturation_limit = satu_limit)
+breaks = c(0, 1e-10, seq(0.001, 1, length.out = 100))
+
+pheatmap(props_Heat, annotation = anno, cluster_cols = F, cluster_rows = F, 
+         color = color, breaks = breaks,  
+         cellwidth = 8, cellheight = 8, fontsize_col = 8, fontsize_row = 8)
+```
+
+\newpage
+
+# Alpha diversity
+
+Alpha diversity was assessd by richness (expected number of observed species out of rarefying sample size of 10000) and Shannon index.
+ 
+```{r}
+s_Alpha <- s %>% 
+  select(SampleID, richness, shannon) %>%
+  gather(key = alpha_measure, value = alpha_value, richness, shannon) %>%
+  mutate(alpha_measure = factor(alpha_measure, levels = c("richness", "shannon"))) %>%
+  merge(s, by = "SampleID", all.x = T) %>%
+  droplevels()
+```
+
+```{r, fig.height = 3}
+g <- s_Alpha %>%
+  group_by(alpha_measure, sex) %>%
+  mutate(repel_text = ifelse(is_outlier(alpha_value), SampleID, "")) %>%
+  ggplot(aes(x = sex, y = alpha_value)) +
+  geom_text_repel(aes(label = repel_text), size = 2, segment.color = "grey") +
+  geom_boxplot() +
+  labs(y = "Value") +
+  ylim(0, NA) +
+  theme(aspect.ratio = 1) +
+  facet_wrap(~alpha_measure, ncol = 2, scales = "free_y")
+
+print(g)
+```
+
+```{r}
+spearman <- s_Alpha %>%
+  group_by(alpha_measure) %>%
+  do(res = cor.test(.$alpha_value, .$ariAvg, method = "spearman"))
+
+summaries <- lapply(1:length(spearman$alpha_measure), 
+                  function(x) data.frame(alpha_measure = spearman$alpha_measure[[x]],
+                                         rho = spearman$res[[x]]$estimate,
+                                         p.value = spearman$res[[x]]$p.value,
+                                         stringsAsFactors = F))
+
+spearman_df <- bind_rows(summaries) %>%
+  mutate(rho_p = paste0("rho = ", round(rho, 3),
+                        "\np value = ", round(p.value, 3))) 
+```
+
+```{r, fig.height = 3}
+g <- s_Alpha %>%
+  ggplot(aes(x = ariAvg, y = alpha_value)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(y = "Value") +
+  ylim(0, NA) +
+  theme(aspect.ratio = 1) +
+  facet_wrap(~alpha_measure, ncol = 2, scales = "free_y")
+
+g <- g + geom_text(data = spearman_df, 
+                   aes(x = -Inf, y = -Inf, label = rho_p), 
+                   hjust = -0.1,
+                   vjust = -0.5)
+print(g)
+```
+
+To test the association between alpha diversity and explanatory variables, a linear regression model was implemented. Sex/ariAvg were used as covariates.
+
+```{r}
+s_Test <- s_Alpha
+
+models <- s_Test %>%
+  group_by(alpha_measure) %>%
+  do(fit = lm(alpha_value ~ sex + ariAvg, data = .))
+
+summaries <- lapply(1:length(models$fit),
+                    function(x) data.frame(summary(models$fit[[x]])$coef,
+                                           Term = rownames(summary(models$fit[[x]])$coef), 
+                                           alpha_measure = models$alpha_measure[[x]],
+                                           stringsAsFactors = F))
+
+summaries_df <- bind_rows(summaries) %>%
+  filter(Term != "(Intercept)") %>%
+  mutate(Term = case_when(Term == "sexMale" ~ "Female $\\rightarrow$ Male",
+                          Term == "ariAvg" ~ "ariAvg")) %>%
+  rename(`Alpha diversity` = alpha_measure) %>%
+  mutate(Estimate = round(Estimate, 2)) %>%
+  rename(`$p$-value` = Pr...t..) %>%
+  mutate(Sig.Label = ifelse(`$p$-value` < 0.05, "*", "")) %>%
+  select(`Alpha diversity`, Term, Estimate, `$p$-value`) %>%
+  as.data.frame() 
+
+pander(summaries_df, split.cells = Inf, split.tables = Inf)
+```
+
+\newpage
+
+```{r, fig.height = 3}
+g <- ggplot(s, aes(sex, ariAvg)) + 
+  geom_boxplot() +
+  theme(aspect.ratio = 1)
+
+print(g)
+t.test(s$ariAvg ~ s$sex)
+```
+
+\newpage
+
+# Beta diversity 
+
+Beta diversity (similarity between samples) was assessed by Bray-Curtis distance and Jaccard distance. 
+
+```{r}
+dist_in <- vegdist(t(props))
+dist_name <- "Bray-Curtis distance"
+```
+
+## Ordination based on `r dist_name`
+
+```{r, fig.height = 3}
+s_Beta <- s 
+
+showup_both <- intersect(colnames(as.matrix(dist_in)), s_Beta$SampleID)
+dist_in <- dist_subset(dist_in, showup_both)
+s_Beta <- s_Beta[match(showup_both, s_Beta$SampleID),]
+
+pcoa_title <- paste0(dist_name)
+pcoa_result <- pcoa(dist_in)
+pcoa_df <- merge(s_Beta, pcoa_result$vectors[,1:2], by.x = "SampleID", by.y = "row.names")
+pcoa_pct <- round(pcoa_result$values$Relative_eig*100, 1)
+
+base <- ggplot(pcoa_df, aes(x = Axis.1, y = Axis.2)) +
+  theme_bw() +
+  xlab(paste0("PCoA axis 1 (", pcoa_pct[1], "%)")) +
+  ylab(paste0("PCoA axis 2 (", pcoa_pct[2], "%)")) +
+  ggtitle(pcoa_title) + 
+  theme(aspect.ratio=1) 
+
+g1 <- base +
+  geom_point(aes(color = sex)) 
+
+print(g1)
+
+g2 <- base +
+  geom_point(aes(color = ariAvg)) +
+  scale_color_viridis()
+
+print(g2)
+```
+
+The association between the centroid positions and sex/ariAvg was tested using a permutational MANOVA.
+
+```{r}
+set.seed(1)
+if (all(colnames(as.matrix(dist_in)) == s_Beta$SampleID)) {
+  res <- adonis(dist_in ~ sex + ariAvg, data = s_Beta, permutations = 999)
+}
+
+adonis_df <- res$aov.tab
+adonis_df <- data.frame(Term = rownames(adonis_df), adonis_df, stringsAsFactors = F) %>%
+  mutate(R2 = round(R2, 3)) %>%
+  rename(`$R^2$` = R2) %>%
+  rename(`$p$-value` = Pr..F.) %>%
+  mutate(Sig.Label = ifelse(`$p$-value` < 0.05, "*", "")) %>%
+  select(Term, Df, `$R^2$`, `$p$-value`)
+
+pander(adonis_df, split.cells = Inf, split.tables = Inf)
+```
+
+\newpage
+
+```{r}
+dist_in <- dist(t(props), method = "binary")
+dist_name <- "Jaccard distance"
+```
+
+## Ordination based on `r dist_name`
+
+```{r, fig.height = 3}
+s_Beta <- s 
+
+showup_both <- intersect(colnames(as.matrix(dist_in)), s_Beta$SampleID)
+dist_in <- dist_subset(dist_in, showup_both)
+s_Beta <- s_Beta[match(showup_both, s_Beta$SampleID),]
+
+pcoa_title <- paste0(dist_name)
+pcoa_result <- pcoa(dist_in)
+pcoa_df <- merge(s_Beta, pcoa_result$vectors[,1:2], by.x = "SampleID", by.y = "row.names")
+pcoa_pct <- round(pcoa_result$values$Relative_eig*100, 1)
+
+pcoa_df$repel_text <- ifelse(pcoa_df$Axis.1 < -0.05, pcoa_df$SampleID, "")
+
+base <- ggplot(pcoa_df, aes(x = Axis.1, y = Axis.2)) +
+  theme_bw() +
+  xlab(paste0("PCoA axis 1 (", pcoa_pct[1], "%)")) +
+  ylab(paste0("PCoA axis 2 (", pcoa_pct[2], "%)")) +
+  ggtitle(pcoa_title) + 
+  theme(aspect.ratio=1) 
+
+g1 <- base +
+  geom_point(aes(color = sex)) +
+  geom_text_repel(aes(label = repel_text), size = 2, segment.color = "grey") 
+  
+print(g1)
+
+g2 <- base +
+  geom_point(aes(color = ariAvg)) +
+  geom_text_repel(aes(label = repel_text), size = 2, segment.color = "grey") +
+  scale_color_viridis()
+
+print(g2)
+```
+
+The association between the centroid positions and sex/ariAvg was tested using a permutational MANOVA.
+
+```{r}
+set.seed(1)
+if (all(colnames(as.matrix(dist_in)) == s_Beta$SampleID)) {
+  res <- adonis(dist_in ~ sex + ariAvg, data = s_Beta, permutations = 999)
+}
+
+adonis_df <- res$aov.tab
+adonis_df <- data.frame(Term = rownames(adonis_df), adonis_df, stringsAsFactors = F) %>%
+  mutate(R2 = round(R2, 3)) %>%
+  rename(`$R^2$` = R2) %>%
+  rename(`$p$-value` = Pr..F.) %>%
+  mutate(Sig.Label = ifelse(`$p$-value` < 0.05, "*", "")) %>%
+  select(Term, Df, `$R^2$`, `$p$-value`)
+
+pander(adonis_df, split.cells = Inf, split.tables = Inf)
+```
+
+\newpage
+
+\blandscape
+
+# Test of differential abundance
+
+```{r}
+min_prop <- 0.01
+nominal_p_cut <- 0.05
+s_toTest <- s
+taxa_to_test <- rownames(props)[apply(props, 1, max) >= min_prop]
+```
+
+A linear model was implemented to test the association between $\log$(proportion) of taxa and sex/ariAvg. Taxa were tested if the abundance in any sample exceeded `r 100*min_prop`%. The following table summarizes the test result: taxa that have a nominal $p$-value < `r nominal_p_cut` are present. 
+
+```{r}
+props_toTest <- props %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>%
+  filter(Taxa %in% taxa_to_test) %>%
+  gather("SampleID", "prop", -Taxa) %>%
+  mutate(log_prop = log(prop + 1e-6)) %>%
+  merge(s_toTest, by = "SampleID")
+
+models <- props_toTest %>%
+  group_by(Taxa) %>%
+  do(fit = lm(log_prop ~ sex + ariAvg, data = .))
+
+summaries <- lapply(1:length(models$fit),
+                    function(x) data.frame(summary(models$fit[[x]])$coef,
+                                           Term = rownames(summary(models$fit[[x]])$coef), 
+                                           Taxa = models$Taxa[[x]],
+                                           stringsAsFactors = F))
+
+summaries_df <- bind_rows(summaries) %>%
+  filter(Term != "(Intercept)") %>%
+  mutate(Term = case_when(Term == "sexMale" ~ "Female $\\rightarrow$ Male",
+                          Term == "ariAvg" ~ "ariAvg")) %>%
+  mutate(Estimate = round(Estimate, 2)) %>%
+  rename(`$p$-value` = Pr...t..) %>%
+  mutate(FDR = p.adjust(`$p$-value`, method = "BH")) %>%
+  #mutate(Sig.Label = ifelse(FDR < 0.05, "*", "")) %>%
+  filter(`$p$-value` < nominal_p_cut) %>%
+  select(Taxa, Term, Estimate, `$p$-value`, FDR) %>%
+  arrange(`$p$-value`) %>%
+  as.data.frame() 
+
+pander(summaries_df, split.cells = Inf, split.tables = Inf)
+```
+
+```{r}
+taxa_to_plot <- unique(summaries_df$Taxa)
+```
+
+Plots describing the abundance of above `r length(taxa_to_plot)` taxa with nominal $p$-value < `r nominal_p_cut` are given below.
+
+\elandscape
+
+\newpage
+
+```{r, fig.height = 8}
+if (length(taxa_to_plot) > 0) {
+props_toTest %>%
+  mutate(prop = prop + 1e-6) %>% ## for log scale prop
+  filter(Taxa %in% taxa_to_plot) %>% 
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x = sex, y = prop)) +
+  geom_boxplot() +
+  theme(aspect.ratio = 1) + 
+  scale_y_log10() + 
+  facet_wrap(~Taxa, scales = "free_y") +
+  theme(strip.text.x = element_text(size = 7))
+}
+```
+
+\newpage
+
+```{r, fig.height = 8}
+if (length(taxa_to_plot) > 0) {
+props_toTest %>%
+  mutate(prop = prop + 1e-6) %>% ## for log scale prop
+  filter(Taxa %in% taxa_to_plot) %>% 
+  mutate(Taxa = sub(" ", "\n", Taxa)) %>%
+  ggplot(aes(x = ariAvg, y = prop)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  theme(aspect.ratio = 1) + 
+  scale_y_log10() + 
+  facet_wrap(~Taxa, scales = "free_y") +
+  theme(strip.text.x = element_text(size = 7))
+}
+```
+
+\newpage
+
+# Analyses on imaging data
+
+```{r}
+ss <- s %>%
+  select(SampleID, sex, ariAvg) %>%
+  droplevels()
+
+tprops <- t(props)
+
+Nmf <- s %>%
+  select(starts_with("Nmf"))
+rownames(Nmf) <- s$SampleID
+```
+
+```{r}
+### perform Mantel's test and create 2x2 plots
+CompDist <- function(dist_mb, dist_nmf, ss) {
+  ### make sure that two distance matrices have matching indices
+  dist_mb <- dist_subset(dist_mb, ss$SampleID)
+  dist_nmf <- dist_subset(dist_nmf, ss$SampleID)
+  ### perform Mantel's test
+  set.seed(1)
+  mantel <- mantel.test(as.matrix(dist_mb), as.matrix(dist_nmf), nperm = 999)
+  cat("Mantel's permutation test for similarity p-value:", mantel$p)
+  
+  ### Plots
+  mb_df <- merge(ss, pcoa(dist_mb)$vectors[,1:2], by.x = "SampleID", by.y = "row.names") %>%
+    mutate(Axis.1 = as.numeric(scale(Axis.1)), Axis.2 = as.numeric(scale(Axis.2))) %>%
+    mutate(source = "Microbiome")
+
+  nmf_df <- merge(ss, pcoa(dist_nmf)$vectors[,1:2], by.x = "SampleID", by.y = "row.names") %>%
+    mutate(Axis.1 = as.numeric(scale(Axis.1)), Axis.2 = as.numeric(scale(Axis.2))) %>%
+    mutate(source = "Nmf")
+
+  nmf_df_x <- merge(ss, pcoa(dist_nmf)$vectors[,1:2], by.x = "SampleID", by.y = "row.names") %>%
+    mutate(Axis.1 = -as.numeric(scale(Axis.1)), Axis.2 = as.numeric(scale(Axis.2))) %>%
+    mutate(source = "Nmf_x_ref")
+
+  nmf_df_y <- merge(ss, pcoa(dist_nmf)$vectors[,1:2], by.x = "SampleID", by.y = "row.names") %>%
+    mutate(Axis.1 = as.numeric(scale(Axis.1)), Axis.2 = -as.numeric(scale(Axis.2))) %>%
+    mutate(source = "Nmf_y_ref")
+
+  nmf_df_xy <- merge(ss, pcoa(dist_nmf)$vectors[,1:2], by.x = "SampleID", by.y = "row.names") %>%
+    mutate(Axis.1 = -as.numeric(scale(Axis.1)), Axis.2 = -as.numeric(scale(Axis.2))) %>%
+    mutate(source = "Nmf_xy_ref")
+
+  g1 <- bind_rows(mb_df, nmf_df) %>%
+    ggplot(aes(Axis.1, Axis.2)) +
+    geom_point(aes(color = source)) +
+    geom_line(aes(group = SampleID)) +
+    theme(aspect.ratio = 1, legend.position = "bottom")
+
+  g2 <- bind_rows(mb_df, nmf_df_x) %>%
+    ggplot(aes(Axis.1, Axis.2)) +
+    geom_point(aes(color = source)) +
+    geom_line(aes(group = SampleID)) +
+    theme(aspect.ratio = 1, legend.position = "bottom")
+
+  g3 <- bind_rows(mb_df, nmf_df_y) %>%
+    ggplot(aes(Axis.1, Axis.2)) +
+    geom_point(aes(color = source)) +
+    geom_line(aes(group = SampleID)) +
+    theme(aspect.ratio = 1, legend.position = "bottom")
+  
+  g4 <- bind_rows(mb_df, nmf_df_xy) %>%
+    ggplot(aes(Axis.1, Axis.2)) +
+    geom_point(aes(color = source)) +
+    geom_line(aes(group = SampleID)) +
+    theme(aspect.ratio = 1, legend.position = "bottom")
+
+grid.arrange(g1, g2, g3, g4, nrow = 2)
+}
+```
+
+## Bray-Curtis (microbiome) and Manhattan (Nmf)
+
+We applied Bray-Curtis distances to microbiome data and Manhattan distances to imgaing data. The $p$-value from Mantel's test for similarity between two distance matrices was obtained. To visualize the comparison between two distance measures, the scaled PCoA plot based on microbiome data (\red{red}) is given and the scaled PCoA plot based on imaging data (\blue{blue}) is overlaid. Additional plots are created after flipping $x$ and $y$ axes of imaging data PCoA. The line segments represent the same sample.
+
+```{r, fig.width = 7.5, fig.height = 7.5}
+dist_mb <- vegdist(tprops, method = "bray")
+dist_nmf <- vegdist(Nmf, method = "manhattan")
+
+CompDist(dist_mb, dist_nmf, ss)
+```
+
+\newpage
+
+## Bray-Curtis (microbiome) and Euclidean (Nmf)
+
+We applied Bray-Curtis distances to microbiome data and Euclidean distances to imgaing data. The $p$-value from Mantel's test for similarity between two distance matrices was obtained. To visualize the comparison between two distance measures, the scaled PCoA plot based on microbiome data (\red{red}) is given and the scaled PCoA plot based on imaging data (\blue{blue}) is overlaid. Additional plots are created after flipping $x$ and $y$ axes of imaging data PCoA. The line segments represent the same sample.
+
+```{r, fig.width = 8, fig.height = 8}
+dist_mb <- vegdist(tprops, method = "bray")
+dist_nmf <- vegdist(Nmf, method = "euclidean")
+
+CompDist(dist_mb, dist_nmf, ss)
+```
+
+\newpage
+
+## Jaccard (microbiome) and Manhattan (Nmf)
+
+We applied Jaccard distances to microbiome data and Manhattan distances to imgaing data. The $p$-value from Mantel's test for similarity between two distance matrices was obtained. To visualize the comparison between two distance measures, the scaled PCoA plot based on microbiome data (\red{red}) is given and the scaled PCoA plot based on imaging data (\blue{blue}) is overlaid. Additional plots are created after flipping $x$ and $y$ axes of imaging data PCoA. The line segments represent the same sample.
+
+```{r, fig.width = 8, fig.height = 8}
+dist_mb <- dist(tprops, method = "binary")
+dist_nmf <- vegdist(Nmf, method = "manhattan")
+
+CompDist(dist_mb, dist_nmf, ss)
+```
+
+\newpage
+
+## Jaccard (microbiome) and Euclidean (Nmf)
+
+We applied Jaccard distances to microbiome data and Euclidean distances to imgaing data. The $p$-value from Mantel's test for similarity between two distance matrices was obtained. To visualize the comparison between two distance measures, the scaled PCoA plot based on microbiome data (\red{red}) is given and the scaled PCoA plot based on imaging data (\blue{blue}) is overlaid. Additional plots are created after flipping $x$ and $y$ axes of imaging data PCoA. The line segments represent the same sample.
+
+```{r, fig.width = 8, fig.height = 8}
+dist_mb <- dist(tprops, method = "binary")
+dist_nmf <- vegdist(Nmf, method = "euclidean")
+
+CompDist(dist_mb, dist_nmf, ss)
+```
